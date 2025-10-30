@@ -206,6 +206,197 @@ docker run --rm -p 8000:8000 cas-scraper
 
 > 将镜像推到你的仓库后，可在 Render / Railway / Fly.io 等平台直接部署。
 
+# 常驻运行（systemd + Gunicorn）速查表
+
+> 场景：把你的 Flask 应用（项目目录：`/www/wwwroot/chem.lifan.icu`，入口 `app.py` 内含 `app = Flask(__name__)`）以 **systemd 服务**常驻运行，并由 **Nginx** 反向代理到域名。
+
+------
+
+## 一次性准备（在服务器终端执行）
+
+```
+# 进入项目并创建虚拟环境
+PROJECT=/www/wwwroot/chem.lifan.icu
+VENVDIR=$PROJECT/.venv
+
+cd $PROJECT
+python3 -m venv $VENVDIR
+source $VENVDIR/bin/activate
+pip install -U pip
+pip install gunicorn flask requests beautifulsoup4 lxml
+
+# 准备日志目录
+sudo mkdir -p /var/log/chem-scraper
+sudo chown -R $USER:$USER /var/log/chem-scraper
+```
+
+------
+
+## systemd 服务文件示例
+
+> 文件路径：`/etc/systemd/system/chem-scraper.service`
+
+```
+[Unit]
+Description=CAS Scraper (Gunicorn)
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/www/wwwroot/chem.lifan.icu
+Environment="PATH=/www/wwwroot/chem.lifan.icu/.venv/bin"
+# 生产建议只监听本机，再由 Nginx 反代
+ExecStart=/www/wwwroot/chem.lifan.icu/.venv/bin/gunicorn app:app \
+  -b 127.0.0.1:8000 --workers 2 --threads 4 --timeout 60 \
+  --access-logfile /var/log/chem-scraper/access.log \
+  --error-logfile  /var/log/chem-scraper/error.log
+# 可选：优雅热重载（给 master 进程发 HUP 信号）
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+应用/更新服务文件后：
+
+```
+sudo systemctl daemon-reload          # 让 systemd 重新读取服务文件
+sudo systemctl enable --now chem-scraper   # 开机自启并立即启动
+```
+
+------
+
+## 常用管理命令（背下来就行）
+
+```
+# 启动 / 停止 / 重启
+sudo systemctl start chem-scraper
+sudo systemctl stop chem-scraper
+sudo systemctl restart chem-scraper          # 改了代码后常用
+
+# （若定义了 ExecReload）优雅重载 Gunicorn
+sudo systemctl reload chem-scraper
+
+# 查看状态
+sudo systemctl status chem-scraper           # q 退出
+systemctl is-active chem-scraper             # active/inactive
+systemctl is-enabled chem-scraper            # enabled/disabled
+
+# 服务文件有修改后
+sudo systemctl daemon-reload
+sudo systemctl restart chem-scraper
+
+# 查看日志（journalctl）
+sudo journalctl -u chem-scraper -f           # 实时滚动（Ctrl+C 退出）
+sudo journalctl -u chem-scraper -n 200       # 最近 200 行
+sudo journalctl -u chem-scraper --since "10 min ago"
+sudo journalctl -u chem-scraper -b           # 本次开机日志
+```
+
+------
+
+## 典型操作流程
+
+- **更新代码** → `sudo systemctl restart chem-scraper`
+
+- **改了服务文件（.service）** → `sudo systemctl daemon-reload && sudo systemctl restart chem-scraper`
+
+- **切换端口**（例如 8000 → 9000）
+   1）改 `.service` 中的 `-b 127.0.0.1:9000` → `daemon-reload` → `restart`
+   2）同步修改 Nginx 的 `proxy_pass` → `sudo nginx -t && sudo systemctl reload nginx`
+
+- **查看监听端口** → `sudo ss -tlnp | grep gunicorn` 或 `grep 8000`
+
+- **放行 80/443（如启用 UFW）**
+
+  ```
+  sudo ufw allow 80/tcp
+  sudo ufw allow 443/tcp
+  ```
+
+------
+
+## Nginx 反向代理（示例片段）
+
+```
+# HTTP 80：跳转到 HTTPS（可选）
+server {
+  listen 80;
+  server_name chem.lifan.icu;
+  return 301 https://chem.lifan.icu$request_uri;
+}
+
+# HTTPS 443
+server {
+  listen 443 ssl http2;
+  server_name chem.lifan.icu;
+
+  ssl_certificate     /etc/letsencrypt/live/chem.lifan.icu/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/chem.lifan.icu/privkey.pem;
+
+  location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_read_timeout 60s;
+    proxy_send_timeout 60s;
+  }
+
+  # 可选：直接由 Nginx 提供静态资源
+  location /static/ {
+    alias /www/wwwroot/chem.lifan.icu/static/;
+    access_log off;
+    expires 7d;
+    add_header Cache-Control "public, max-age=604800, immutable";
+  }
+}
+```
+
+测试并重载：
+
+```
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+------
+
+## 故障排查速查
+
+- **`ModuleNotFoundError: No module named 'app'`**
+   `WorkingDirectory` 不对或入口不是 `app.py`。确保 `/www/wwwroot/chem.lifan.icu/app.py` 存在且有 `app = Flask(__name__)`。若入口叫 `server.py`，把 `app:app` 改为 `server:app`。
+- **端口占用 / 无法连接**
+   `sudo ss -tlnp | grep 8000` 查占用；改端口或停止冲突进程。
+- **依赖缺失**
+   确认用的是 **同一个 venv**：`/www/wwwroot/chem.lifan.icu/.venv/bin/gunicorn`
+   需要时在 venv 里重新：`pip install -U -r requirements.txt`
+- **Nginx 502**
+   大概率是 Gunicorn 没起来或监听地址不匹配；`systemctl status chem-scraper` & `journalctl -u chem-scraper -n 200` 对照排查。
+- **改了 .service 不生效**
+   记得 `sudo systemctl daemon-reload` 再 `restart`。
+
+------
+
+## 备选后台方案（不建议用于生产）
+
+```
+# 守护进程模式（Gunicorn 自带）
+/www/wwwroot/chem.lifan.icu/.venv/bin/gunicorn --chdir /www/wwwroot/chem.lifan.icu app:app \
+  -b 0.0.0.0:8000 --workers 2 --threads 4 --timeout 60 \
+  -D --pid /run/chem-scraper.pid \
+  --access-logfile /var/log/chem-scraper/access.log \
+  --error-logfile  /var/log/chem-scraper/error.log
+
+# 停止
+kill "$(cat /run/chem-scraper.pid)"
+```
+
+或用 `screen`/`tmux` 保活会话（开发调试方便，生产不推荐）。
+
 ## ❓常见问题（FAQ）
 
 - **返回 `HTTP 503`？**
