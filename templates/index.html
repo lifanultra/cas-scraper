@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CAS 物化性质查询（ChemicalBook）by LIFANULTRA</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>CAS 物化性质查询</h1>
+    <p class="subtitle">Source：ChemicalBook </p>
+
+    <form id="query-form">
+      <label for="cas-input">输入 CAS 号：</label>
+      <div class="row">
+        <input id="cas-input" type="text" placeholder="例如：67-56-1（甲醇）" required />
+        <button id="search-btn" type="submit">查询</button>
+      </div>
+      <small class="hint">格式应类似 <code>7732-18-5</code>。示例：甲醇 67-56-1，水 7732-18-5。</small>
+    </form>
+
+    <section id="loading" class="loading" hidden>正在检索...</section>
+
+    <section id="result" hidden>
+      <div class="meta" id="meta"></div>
+      <table class="props" id="props-table">
+        <thead>
+          <tr>
+            <th>属性 / Property</th>
+            <th>值 / Value</th>
+          </tr>
+
+        </thead>
+        <tbody id="props-body"></tbody>
+      </table>
+      <p id="source" class="source"></p>
+    </section>
+
+    <section id="error" class="error" hidden></section>
+
+    <footer>
+      <p>
+        请遵守目标站点的服务条款与 robots 协议，控制抓取频率；本示例不做任何批量采集与商业使用保证。
+      </p>
+    </footer>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
